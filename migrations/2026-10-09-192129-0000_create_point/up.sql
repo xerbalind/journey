@@ -1,0 +1,8 @@
+-- Your SQL goes here
+CREATE TABLE points (
+  id SERIAL PRIMARY KEY,
+  lon REAL NOT NULL, 
+  lat REAL NOT NULL,
+  alt SMALLINT NOT NULL,
+  time TIMESTAMP NOT NULL
+)
