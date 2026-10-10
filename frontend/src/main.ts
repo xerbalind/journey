@@ -1,4 +1,4 @@
-import { Map, setWorkerUrl } from "maplibre-gl";
+import { Map, setWorkerUrl, AttributionControl } from "maplibre-gl";
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 import "maplibre-gl/dist/maplibre-gl.css";
 
@@ -12,8 +12,19 @@ const map = new Map({
     container: 'map',
     style: 'https://tiles.openfreemap.org/styles/bright',
     center: position,
-    zoom: 16
+    zoom: 16,
+    attributionControl: false 
 });
+
+map.addControl(
+  new AttributionControl({
+    compact: true,
+    customAttribution:
+      '<a href="https://github.com/xerbalind/journey" target="_blank" rel="noopener noreferrer">Source Code</a>'
+  }),
+  "bottom-right"
+);
+
 
 /*
  * Source: https://maplibre.org/maplibre-gl-js/docs/examples/add-an-animated-icon-to-the-map/
@@ -130,4 +141,5 @@ map.on('load', () => {
             'icon-image': 'pulsing-dot'
         }
     });
+
 });
