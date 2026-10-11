@@ -36,15 +36,7 @@ async fn main() {
             .unwrap();
     }
 
-    let cors = CorsLayer::new()
-        .allow_origin(
-            std::env::var("FRONTEND_URL")
-                .expect("FRONTEND_URL environment is missing")
-                .parse::<HeaderValue>()
-                .unwrap(),
-        )
-        .allow_methods([Method::GET])
-        .allow_headers([header::CONTENT_TYPE]);
+    let cors = CorsLayer::permissive();
 
     let mut app = Router::new()
         .route("/api/journey.geojson", get(get_geojson))
