@@ -3,10 +3,9 @@ use std::net::SocketAddr;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
-use crate::routes::{create_point, get_geojson, get_position};
+use crate::routes::{create_point, get_geojsons, get_position};
 use axum::{
     Router,
-    http::{HeaderValue, Method, header},
     routing::{get, post},
 };
 
@@ -39,7 +38,7 @@ async fn main() {
     let cors = CorsLayer::permissive();
 
     let mut app = Router::new()
-        .route("/api/journey.geojson", get(get_geojson))
+        .route("/api/journey.geojsons", get(get_geojsons))
         .route("/api/position", get(get_position))
         .route("/api/point", post(create_point))
         .layer(cors)

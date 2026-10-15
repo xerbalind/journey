@@ -13,16 +13,15 @@ const map = new Map({
     style: 'https://tiles.openfreemap.org/styles/bright',
     center: position,
     zoom: 16,
-    attributionControl: false 
 });
 
 map.addControl(
-  new AttributionControl({
-    compact: true,
-    customAttribution:
-      '<a href="https://github.com/xerbalind/journey" target="_blank" rel="noopener noreferrer">Source Code</a>'
-  }),
-  "bottom-right"
+    new AttributionControl({
+        compact: true,
+        customAttribution:
+            '<a href="https://github.com/xerbalind/journey" target="_blank" rel="noopener noreferrer">Source Code</a>'
+    }),
+    "bottom-right"
 );
 
 
@@ -36,7 +35,7 @@ export const pulsingDot: any = {
     data: new Uint8Array(size * size * 4),
 
     // get rendering context for the map canvas when layer is added to the map
-    onAdd () {
+    onAdd() {
         const canvas = document.createElement('canvas');
         canvas.width = this.width;
         canvas.height = this.height;
@@ -44,7 +43,7 @@ export const pulsingDot: any = {
     },
 
     // called once before every frame where the icon will be used
-    render () {
+    render() {
         const duration = 1000;
         const t = (performance.now() % duration) / duration;
 
@@ -96,27 +95,42 @@ export const pulsingDot: any = {
     }
 };
 
-map.on('load', () => {
-    map.addSource('route', {
-        'type': 'geojson',
-	'data': `${apiUrl}/journey.geojson`,
-    });
-    map.addLayer({
-        'id': 'route',
-        'type': 'line',
-        'source': 'route',
-        'layout': {
-            'line-join': 'round',
-            'line-cap': 'round'
-        },
-        'paint': {
-            'line-color': '#ff7f00',
-            'line-width': 8
-        }
+map.on('load', async () => {
+    // Get geojsons
+    const geojsonResponse = await fetch(`${apiUrl}/journey.geojsons`);
+    const geojsons: Array<{
+        properties: { color: string },
+        geometry: { type: string, coordinates: Array<[number, number]> }
+    }> = await geojsonResponse.json();
+
+    // Render each day
+    geojsons.forEach((geojson, index) => {
+        const sourceId = `route-${index}`;
+        const layerId = `route-layer-${index}`;
+        const color = geojson.properties.color;
+
+        map.addSource(sourceId, {
+            'type': 'geojson',
+            'data': geojson
+        });
+
+        map.addLayer({
+            'id': layerId,
+            'type': 'line',
+            'source': sourceId,
+            'layout': {
+                'line-join': 'round',
+                'line-cap': 'round'
+            },
+            'paint': {
+                'line-color': color,
+                'line-width': 8
+            }
+        });
     });
 
-    
-    map.addImage('pulsing-dot', pulsingDot, {pixelRatio: 2});
+
+    map.addImage('pulsing-dot', pulsingDot, { pixelRatio: 2 });
     map.addSource('position', {
         'type': 'geojson',
         'data': {
@@ -141,5 +155,4 @@ map.on('load', () => {
             'icon-image': 'pulsing-dot'
         }
     });
-
 });
