@@ -27,6 +27,8 @@ pub async fn create_point(
     Ok(Json(res))
 }
 
+const MIN_POINTS_PER_DAY: usize = 12;
+
 pub async fn get_geojsons(
     State(pool): State<deadpool_diesel::postgres::Pool>,
 ) -> Result<Json<Vec<GeoJSON>>, AppError> {
@@ -50,6 +52,8 @@ pub async fn get_geojsons(
         let day = point.time.format("%Y-%m-%d").to_string();
         days.entry(day).or_default().push((point.lon, point.lat));
     }
+
+    days.retain(|_, coordinates| coordinates.len() >= MIN_POINTS_PER_DAY);
 
     let total_days = days.len();
     let mut result = Vec::new();
