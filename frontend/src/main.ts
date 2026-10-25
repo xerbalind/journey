@@ -13,6 +13,7 @@ const map = new Map({
     style: 'https://tiles.openfreemap.org/styles/bright',
     center: position,
     zoom: 16,
+    attributionControl: false
 });
 
 map.addControl(
