@@ -3,6 +3,7 @@ use diesel::prelude::*;
 use diesel::{RunQueryDsl, SelectableHelper};
 use std::collections::BTreeMap;
 
+use crate::models::{NewTemperature, Temperature};
 use crate::{
     error::AppError::{self, Internal},
     geojson::{Coordinate, GeoJSON},
@@ -19,6 +20,24 @@ pub async fn create_point(
             diesel::insert_into(crate::schema::points::table)
                 .values(new_point)
                 .returning(Point::as_returning())
+                .get_result(conn)
+        })
+        .await
+        .map_err(|_| Internal)?
+        .map_err(|_| Internal)?;
+    Ok(Json(res))
+}
+
+pub async fn create_temperature(
+    State(pool): State<deadpool_diesel::postgres::Pool>,
+    Json(new_temperature): Json<NewTemperature>,
+) -> Result<Json<Temperature>, AppError> {
+    let conn = pool.get().await.map_err(|_| Internal)?;
+    let res = conn
+        .interact(|conn| {
+            diesel::insert_into(crate::schema::temperatures::table)
+                .values(new_temperature)
+                .returning(Temperature::as_returning())
                 .get_result(conn)
         })
         .await

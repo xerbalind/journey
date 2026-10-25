@@ -1,4 +1,7 @@
-use axum::{http::StatusCode, response::{IntoResponse, Response}};
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -12,7 +15,6 @@ impl IntoResponse for AppError {
         self.error_page().into_response()
     }
 }
-
 
 impl AppError {
     fn error_page(&self) -> (StatusCode, String) {

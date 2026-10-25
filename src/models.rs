@@ -9,7 +9,7 @@ pub struct Point {
     pub lat: f32,
     pub lon: f32,
     pub alt: Option<i16>,
-    pub time: NaiveDateTime
+    pub time: NaiveDateTime,
 }
 
 #[derive(serde::Deserialize, Insertable)]
@@ -18,5 +18,21 @@ pub struct NewPoint {
     pub lat: f32,
     pub lon: f32,
     pub alt: Option<i16>,
-    pub time: NaiveDateTime
+    pub time: NaiveDateTime,
+}
+
+#[derive(Queryable, Selectable, serde::Serialize)]
+#[diesel(table_name = crate::schema::temperatures)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct Temperature {
+    pub id: i32,
+    pub value: f32,
+    pub time: NaiveDateTime,
+}
+
+#[derive(serde::Deserialize, Insertable)]
+#[diesel(table_name = crate::schema::temperatures)]
+pub struct NewTemperature {
+    pub value: f32,
+    pub time: NaiveDateTime,
 }

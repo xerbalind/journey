@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
-use crate::routes::{create_point, get_geojsons, get_position};
+use crate::routes::{create_point, create_temperature, get_geojsons, get_position};
 use axum::{
     Router,
     routing::{get, post},
@@ -41,6 +41,7 @@ async fn main() {
         .route("/api/journey.geojsons", get(get_geojsons))
         .route("/api/position", get(get_position))
         .route("/api/point", post(create_point))
+        .route("/api/temperature", post(create_temperature))
         .layer(cors)
         .with_state(pool);
 

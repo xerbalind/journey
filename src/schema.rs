@@ -9,3 +9,13 @@ diesel::table! {
         time -> Timestamp,
     }
 }
+
+diesel::table! {
+    temperatures (id) {
+        id -> Int4,
+        value -> Float4,
+        time -> Timestamp,
+    }
+}
+
+diesel::allow_tables_to_appear_in_same_query!(points, temperatures,);
