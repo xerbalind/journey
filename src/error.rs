@@ -18,12 +18,10 @@ impl IntoResponse for AppError {
 
 impl AppError {
     fn error_page(&self) -> (StatusCode, String) {
-        let (status, msg) = match self {
-            _ => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                String::from("Internal Server Error"),
-            ),
-        };
+        let (status, msg) = (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            String::from("Internal Server Error"),
+        );
 
         (status, msg)
     }

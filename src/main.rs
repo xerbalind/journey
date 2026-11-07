@@ -4,6 +4,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
 use crate::routes::{create_point, create_temperature, get_geojsons, get_position};
+use crate::state::AppState;
 use axum::{
     Router,
     routing::{get, post},
@@ -14,8 +15,11 @@ pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/");
 mod error;
 mod geojson;
 mod models;
+mod openrouteservice;
+mod processing;
 mod routes;
 mod schema;
+mod state;
 
 #[tokio::main]
 async fn main() {
@@ -35,6 +39,10 @@ async fn main() {
             .unwrap();
     }
 
+    let processing = openrouteservice::OpenRouteService::from_env()
+        .ok()
+        .map(|ors| processing::spawn(pool.clone(), ors));
+
     let cors = CorsLayer::permissive();
 
     let mut app = Router::new()
@@ -43,7 +51,7 @@ async fn main() {
         .route("/api/point", post(create_point))
         .route("/api/temperature", post(create_temperature))
         .layer(cors)
-        .with_state(pool);
+        .with_state(AppState { pool, processing });
 
     app = app.fallback_service(ServeDir::new("./public"));
 

@@ -1,0 +1,11 @@
+ALTER TABLE points
+ADD COLUMN processed BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE routes (
+    id SERIAL PRIMARY KEY,
+    point_id INTEGER UNIQUE REFERENCES points(id),
+    lon REAL NOT NULL,
+    lat REAL NOT NULL,
+    alt SMALLINT,
+    distance DOUBLE PRECISION
+);

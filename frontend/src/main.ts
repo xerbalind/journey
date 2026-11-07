@@ -1,4 +1,4 @@
-import { Map, setWorkerUrl, AttributionControl } from "maplibre-gl";
+import { Map, setWorkerUrl, AttributionControl, type IControl } from "maplibre-gl";
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 import "maplibre-gl/dist/maplibre-gl.css";
 
@@ -96,40 +96,99 @@ export const pulsingDot: any = {
     }
 };
 
+type Feature = {
+    properties: { color: string },
+    geometry: { type: string, coordinates: Array<[number, number]> }
+};
+
+class RouteToggleControl implements IControl {
+    private container: HTMLDivElement | undefined;
+
+    private pointCount: number;
+    private routeCount: number;
+
+    constructor(pointCount: number, routeCount: number) {
+        this.pointCount = pointCount;
+        this.routeCount = routeCount;
+    }
+
+    onAdd(map: Map): HTMLElement {
+        const container = document.createElement('div');
+        container.className = 'maplibregl-ctrl maplibregl-ctrl-group route-toggle';
+
+        const addCheckbox = (text: string, prefix: string, count: number) => {
+            const label = document.createElement('label');
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = true;
+            checkbox.addEventListener('change', () => {
+                for (let index = 0; index < count; index++) {
+                    map.setLayoutProperty(
+                        `${prefix}-layer-${index}`,
+                        'visibility',
+                        checkbox.checked ? 'visible' : 'none'
+                    );
+                }
+            });
+            label.append(checkbox, text);
+            container.appendChild(label);
+        };
+
+        addCheckbox('Predicted route', 'routes', this.routeCount);
+        addCheckbox('GPS points', 'points', this.pointCount);
+
+        this.container = container;
+        return container;
+    }
+
+    onRemove(): void {
+        this.container?.remove();
+        this.container = undefined;
+    }
+}
+
 map.on('load', async () => {
     // Get geojsons
     const geojsonResponse = await fetch(`${apiUrl}/journey.geojsons`);
-    const geojsons: Array<{
-        properties: { color: string },
-        geometry: { type: string, coordinates: Array<[number, number]> }
-    }> = await geojsonResponse.json();
+    const geojsons: { points: Feature[], routes: Feature[] } = await geojsonResponse.json();
 
     // Render each day
-    geojsons.forEach((geojson, index) => {
-        const sourceId = `route-${index}`;
-        const layerId = `route-layer-${index}`;
-        const color = geojson.properties.color;
+    const addLines = (prefix: string, features: Feature[], visible: boolean) => {
+        features.forEach((geojson, index) => {
+            const sourceId = `${prefix}-${index}`;
+            const layerId = `${prefix}-layer-${index}`;
+            const color = geojson.properties.color;
 
-        map.addSource(sourceId, {
-            'type': 'geojson',
-            'data': geojson
+            map.addSource(sourceId, {
+                'type': 'geojson',
+                'data': geojson
+            });
+
+            map.addLayer({
+                'id': layerId,
+                'type': 'line',
+                'source': sourceId,
+                'layout': {
+                    'line-join': 'round',
+                    'line-cap': 'round',
+                    'visibility': visible ? 'visible' : 'none'
+                },
+                'paint': {
+                    'line-color': color,
+                    'line-width': 8
+                }
+            });
         });
+    };
 
-        map.addLayer({
-            'id': layerId,
-            'type': 'line',
-            'source': sourceId,
-            'layout': {
-                'line-join': 'round',
-                'line-cap': 'round'
-            },
-            'paint': {
-                'line-color': color,
-                'line-width': 8
-            }
-        });
-    });
+    // Raw GPS lines are added last so they render on top of the predicted route.
+    addLines('routes', geojsons.routes, true);
+    addLines('points', geojsons.points, true);
 
+    map.addControl(
+        new RouteToggleControl(geojsons.points.length, geojsons.routes.length),
+        'top-right'
+    );
 
     map.addImage('pulsing-dot', pulsingDot, { pixelRatio: 2 });
     map.addSource('position', {
