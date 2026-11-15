@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 // General
-const PROFILE: &str = "cycling-regular";
+const PROFILE: &str = "cycling-mountain";
 
 // Snap
 const SNAP_RADIUS_METERS: f64 = 350.0;
