@@ -101,26 +101,61 @@ type Feature = {
     geometry: { type: string, coordinates: Array<[number, number]> }
 };
 
+type LayerVisibility = { routes: boolean, points: boolean };
+const LAYER_VISIBILITY_KEY = 'journey.layerVisibility';
+
+function loadLayerVisibility(): LayerVisibility {
+    const fallback: LayerVisibility = { routes: true, points: true };
+    try {
+        const stored = localStorage.getItem(LAYER_VISIBILITY_KEY);
+        if (stored === null) {
+            return fallback;
+        }
+
+        const parsed = JSON.parse(stored);
+        if (
+            typeof parsed === 'object'
+            && parsed !== null
+        ) {
+            return { routes: parsed["routes"] ?? true, points: parsed["points"] ?? true };
+        }
+
+        return fallback;
+    } catch {
+        return fallback;
+    }
+}
+
+function saveLayerVisibility(visibility: LayerVisibility) {
+    try {
+        localStorage.setItem(LAYER_VISIBILITY_KEY, JSON.stringify(visibility));
+    } catch {
+        return
+    }
+}
+
 class RouteToggleControl implements IControl {
     private container: HTMLDivElement | undefined;
 
     private pointCount: number;
     private routeCount: number;
+    private visibility: LayerVisibility;
 
-    constructor(pointCount: number, routeCount: number) {
+    constructor(pointCount: number, routeCount: number, visibility: LayerVisibility) {
         this.pointCount = pointCount;
         this.routeCount = routeCount;
+        this.visibility = visibility;
     }
 
     onAdd(map: Map): HTMLElement {
         const container = document.createElement('div');
         container.className = 'maplibregl-ctrl maplibregl-ctrl-group route-toggle';
 
-        const addCheckbox = (text: string, prefix: string, count: number) => {
+        const addCheckbox = (text: string, prefix: keyof LayerVisibility, count: number) => {
             const label = document.createElement('label');
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
-            checkbox.checked = true;
+            checkbox.checked = this.visibility[prefix];
             checkbox.addEventListener('change', () => {
                 for (let index = 0; index < count; index++) {
                     map.setLayoutProperty(
@@ -129,6 +164,8 @@ class RouteToggleControl implements IControl {
                         checkbox.checked ? 'visible' : 'none'
                     );
                 }
+                this.visibility[prefix] = checkbox.checked;
+                saveLayerVisibility(this.visibility);
             });
             label.append(checkbox, text);
             container.appendChild(label);
@@ -182,11 +219,12 @@ map.on('load', async () => {
     };
 
     // Raw GPS lines are added last so they render on top of the predicted route.
-    addLines('routes', geojsons.routes, true);
-    addLines('points', geojsons.points, true);
+    const visibility = loadLayerVisibility();
+    addLines('routes', geojsons.routes, visibility.routes);
+    addLines('points', geojsons.points, visibility.points);
 
     map.addControl(
-        new RouteToggleControl(geojsons.points.length, geojsons.routes.length),
+        new RouteToggleControl(geojsons.points.length, geojsons.routes.length, visibility),
         'top-right'
     );
 
