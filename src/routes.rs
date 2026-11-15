@@ -8,14 +8,13 @@ use crate::{
     error::AppError::{self, Internal},
     geojson::{Coordinate, GeoJSON, Journey},
     models::{NewPoint, Point, Route},
-    state::AppState,
 };
 
 pub async fn create_point(
-    State(state): State<AppState>,
+    State(pool): State<deadpool_diesel::postgres::Pool>,
     Json(new_point): Json<NewPoint>,
 ) -> Result<Json<Point>, AppError> {
-    let conn = state.pool.get().await.map_err(|_| Internal)?;
+    let conn = pool.get().await.map_err(|_| Internal)?;
     let res = conn
         .interact(|conn| {
             diesel::insert_into(crate::schema::points::table)
@@ -26,9 +25,6 @@ pub async fn create_point(
         .await
         .map_err(|_| Internal)?
         .map_err(|_| Internal)?;
-    if let Some(processing) = &state.processing {
-        processing.notify_one();
-    }
     Ok(Json(res))
 }
 
@@ -87,7 +83,7 @@ pub async fn get_geojsons(
         let day = point.time.format("%Y-%m-%d").to_string();
         days.entry(day.clone())
             .or_default()
-            .push((point.lon, point.lat));
+            .push(Coordinate(point.lon, point.lat));
         point_days.insert(point.id, day);
     }
 
@@ -98,7 +94,7 @@ pub async fn get_geojsons(
     let mut pending: Vec<Coordinate> = Vec::new();
 
     for route in routes {
-        pending.push((route.lon, route.lat));
+        pending.push(Coordinate(route.lon, route.lat));
         if let Some(point_id) = route.point_id {
             if let Some(day) = point_days.get(&point_id) {
                 route_days
@@ -142,14 +138,10 @@ fn day_lines(days: BTreeMap<String, Vec<Coordinate>>, (dark, light): (&str, &str
         let color = if is_dark { dark } else { light };
 
         result.push(GeoJSON {
-            type_: crate::geojson::Type::Feature,
             properties: serde_json::json!({
                 "color": color
             }),
-            geometry: crate::geojson::Geometry {
-                type_: crate::geojson::GeometryType::LineString,
-                coordinates,
-            },
+            geometry: crate::geojson::Geometry { coordinates },
         });
     }
 
@@ -171,5 +163,5 @@ pub async fn get_position(
         .map_err(|_| Internal)?
         .map_err(|_| Internal)?;
 
-    Ok(Json((point.lon, point.lat)))
+    Ok(Json(Coordinate(point.lon, point.lat)))
 }

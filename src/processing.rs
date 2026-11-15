@@ -1,62 +1,48 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use deadpool_diesel::postgres::Pool;
 use diesel::prelude::*;
-use tokio::sync::Notify;
 
 use crate::{
-    geojson::{Coordinate, Position, distance_meters},
+    geojson::Coordinate,
     models::{NewRoute, Point, Route},
-    openrouteservice::{OpenRouteService, OrsError},
+    openrouteservice::{DIRECTIONS_MAX_POINTS, DIRECTIONS_MIN_POINTS, OpenRouteService, OrsError},
 };
 
-/// Points per round, per snap request, and coordinates per directions request.
-const BATCH_SIZE: usize = 50;
-/// How long to wait after a transient ORS failure (rate limit, quota, outage).
-const RETRY_DELAY: Duration = Duration::from_secs(15 * 60);
+/// Time between runs
+const RUN_INTERVAL: Duration = Duration::from_secs(15 * 60);
+/// Time between halved retries after a permanent ORS error
+const RUN_INTERVAL_SOFT: Duration = Duration::from_secs(60);
+const BATCH_SIZE: usize = DIRECTIONS_MAX_POINTS - 1;
 
-enum RoundError {
-    /// A transient ORS failure: wait `RETRY_DELAY`, then retry.
-    Ors,
-    /// A database failure: give up until the next wake-up.
+#[derive(Debug, thiserror::Error)]
+enum RunError {
+    #[error("ORS error: {0}")]
+    Ors(String),
+    #[error("database error: {0}")]
     Db(String),
 }
 
-/// Start the background worker that turns unprocessed points into `routes` rows.
-/// It runs once right away (backfill) and again every time the returned `Notify` fires.
-pub fn spawn(pool: Pool, ors: OpenRouteService) -> Arc<Notify> {
-    let notify = Arc::new(Notify::new());
-    notify.notify_one();
+fn db(error: impl ToString) -> RunError {
+    RunError::Db(error.to_string())
+}
 
-    let worker = notify.clone();
+/// Start the background worker that converts the gps points in routes.
+/// Runs run every RUN_INTERVAL and prints any error
+pub fn spawn(pool: Pool, ors: OpenRouteService) {
     tokio::spawn(async move {
         loop {
-            worker.notified().await;
-            loop {
-                match process_round(&pool, &ors).await {
-                    Ok(true) => {}
-                    Ok(false) => break,
-                    Err(RoundError::Ors) => tokio::time::sleep(RETRY_DELAY).await,
-                    Err(RoundError::Db(message)) => {
-                        eprintln!("processing: database error: {message}");
-                        break;
-                    }
-                }
+            if let Err(error) = run(&pool, &ors).await {
+                eprintln!("{error}");
             }
+            tokio::time::sleep(RUN_INTERVAL).await;
         }
     });
-
-    notify
 }
 
-fn db_error(error: impl ToString) -> RoundError {
-    RoundError::Db(error.to_string())
-}
-
-/// Process up to `BATCH_SIZE` unprocessed points.
-/// Returns `Ok(false)` when there was nothing to process.
-async fn process_round(pool: &Pool, ors: &OpenRouteService) -> Result<bool, RoundError> {
-    let conn = pool.get().await.map_err(db_error)?;
+/// Get the next points that need to be processed
+async fn run(pool: &Pool, ors: &OpenRouteService) -> Result<(), RunError> {
+    let conn = pool.get().await.map_err(db)?;
     let (points, last_route) = conn
         .interact(|conn| {
             let points = crate::schema::points::table
@@ -76,44 +62,98 @@ async fn process_round(pool: &Pool, ors: &OpenRouteService) -> Result<bool, Roun
             Ok::<_, diesel::result::Error>((points, last_route))
         })
         .await
-        .map_err(db_error)?
-        .map_err(db_error)?;
+        .map_err(db)?
+        .map_err(db)?;
     drop(conn);
 
-    if points.is_empty() {
-        return Ok(false);
+    if points.len() < DIRECTIONS_MIN_POINTS {
+        return Ok(());
     }
 
-    let snapped = snap_all(ors, &points).await?;
+    let previous = last_route.map(|route| Coordinate(route.lon, route.lat));
+    let mut batch: &[Point] = &points;
+
+    loop {
+        match process_batch(ors, batch, previous).await {
+            Ok(rows) => {
+                store(pool, rows, batch).await?;
+                return Ok(());
+            }
+            Err(OrsError::Transient(message)) => return Err(RunError::Ors(message)),
+            // If we get a permanent error then that means at least one of the points if unable to
+            // be processed
+            Err(OrsError::Permanent(_)) => {
+                // We already have the minimum amount of points
+                // Just insert them as the raw data points in the routes table
+                if batch.len() <= DIRECTIONS_MIN_POINTS {
+                    let mut builder = RouteBuilder {
+                        rows: Vec::new(),
+                        previous,
+                    };
+                    for point in batch {
+                        let raw = Coordinate(point.lon, point.lat);
+                        let distance = builder.previous.map(|previous| previous.distance(raw));
+                        builder.push(raw, point.alt, Some(point.id), distance);
+                    }
+
+                    store(pool, builder.rows, batch).await?;
+                    return Ok(());
+                }
+                // Keep dividing the points in 2 until it either works or we get to DIRECTIONS_MIN_POINTS
+                tokio::time::sleep(RUN_INTERVAL_SOFT).await;
+                batch = &batch[..batch.len().div_ceil(2)];
+            }
+        }
+    }
+}
+
+/// Snap points and route them with directions starting from the previous point
+async fn process_batch(
+    ors: &OpenRouteService,
+    points: &[Point],
+    previous: Option<Coordinate>,
+) -> Result<Vec<NewRoute>, OrsError> {
+    let coordinates: Vec<Coordinate> = points
+        .iter()
+        .map(|point| Coordinate(point.lon, point.lat))
+        .collect();
+    let snapped = ors.snap(&coordinates).await?;
 
     let mut builder = RouteBuilder {
         rows: Vec::new(),
-        previous: last_route.map(|route| (f64::from(route.lon), f64::from(route.lat))),
+        previous,
     };
-    let mut run: Vec<(&Point, (f64, f64))> = Vec::new();
+    let mut pending: Vec<(&Point, Coordinate)> = Vec::new();
 
     for (point, snap) in points.iter().zip(snapped) {
         match snap {
+            // Point couldn't be snapped
+            // So process the pending points to build a route
+            // And add the new raw point afterwards
             None => {
-                builder.route_run(ors, &run).await?;
-                run.clear();
-                let raw = (f64::from(point.lon), f64::from(point.lat));
-                let distance = builder
-                    .previous
-                    .map(|previous| distance_meters(previous, raw));
+                builder.process(ors, &pending).await?;
+                pending.clear();
+                let raw = Coordinate(point.lon, point.lat);
+                let distance = builder.previous.map(|previous| previous.distance(raw));
                 builder.push(raw, point.alt, Some(point.id), distance);
             }
+            // First point ever so just push to the table
             Some(location) if builder.previous.is_none() => {
                 builder.push(location, point.alt, Some(point.id), None);
             }
-            Some(location) => run.push((point, location)),
+            // Add in the pending queue to build the route
+            Some(location) => pending.push((point, location)),
         }
     }
-    builder.route_run(ors, &run).await?;
 
-    let rows = builder.rows;
+    builder.process(ors, &pending).await?;
+    Ok(builder.rows)
+}
+
+/// Insert rows into routes and mark points processed
+async fn store(pool: &Pool, rows: Vec<NewRoute>, points: &[Point]) -> Result<(), RunError> {
     let ids: Vec<i32> = points.iter().map(|point| point.id).collect();
-    let conn = pool.get().await.map_err(db_error)?;
+    let conn = pool.get().await.map_err(db)?;
     conn.interact(move |conn| {
         conn.transaction(|conn| {
             diesel::insert_into(crate::schema::routes::table)
@@ -127,65 +167,40 @@ async fn process_round(pool: &Pool, ors: &OpenRouteService) -> Result<bool, Roun
         })
     })
     .await
-    .map_err(db_error)?
-    .map_err(db_error)?;
+    .map_err(db)?
+    .map_err(db)?;
 
-    Ok(true)
-}
-
-async fn snap_all(
-    ors: &OpenRouteService,
-    points: &[Point],
-) -> Result<Vec<Option<(f64, f64)>>, RoundError> {
-    let coordinates: Vec<Coordinate> = points.iter().map(|point| (point.lon, point.lat)).collect();
-    match ors.snap(&coordinates).await {
-        Ok(snapped) => Ok(snapped),
-        Err(OrsError::Transient(_)) => Err(RoundError::Ors),
-        Err(OrsError::Permanent(_)) => {
-            let mut snapped = Vec::with_capacity(coordinates.len());
-            for coordinate in coordinates {
-                match ors.snap(&[coordinate]).await {
-                    Ok(single) => snapped.push(single.into_iter().next().flatten()),
-                    Err(OrsError::Permanent(_)) => snapped.push(None),
-                    Err(OrsError::Transient(_)) => return Err(RoundError::Ors),
-                }
-            }
-            Ok(snapped)
-        }
-    }
+    Ok(())
 }
 
 struct RouteBuilder {
     rows: Vec<NewRoute>,
-    /// Location of the last route row, stored or about to be stored.
-    previous: Option<(f64, f64)>,
+    previous: Option<Coordinate>,
 }
 
 impl RouteBuilder {
     fn push(
         &mut self,
-        location: (f64, f64),
+        location: Coordinate,
         alt: Option<i16>,
         point_id: Option<i32>,
         distance: Option<f64>,
     ) {
         self.rows.push(NewRoute {
             point_id,
-            lon: location.0 as f32,
-            lat: location.1 as f32,
+            lon: location.0,
+            lat: location.1,
             alt,
             distance,
         });
         self.previous = Some(location);
     }
 
-    /// Route from `previous` through the snapped targets of `run`, in chunks of at most
-    /// `BATCH_SIZE` coordinates that share their boundary coordinate.
-    async fn route_run(
+    async fn process(
         &mut self,
         ors: &OpenRouteService,
-        run: &[(&Point, (f64, f64))],
-    ) -> Result<(), RoundError> {
+        run: &[(&Point, Coordinate)],
+    ) -> Result<(), OrsError> {
         let Some(start) = self.previous else {
             return Ok(());
         };
@@ -193,83 +208,34 @@ impl RouteBuilder {
             return Ok(());
         }
 
-        let waypoints: Vec<(f64, f64)> = std::iter::once(start)
+        let waypoints: Vec<Coordinate> = std::iter::once(start)
             .chain(run.iter().map(|(_, location)| *location))
             .collect();
 
-        for chunk_start in (0..run.len()).step_by(BATCH_SIZE - 1) {
-            let chunk_end = (chunk_start + BATCH_SIZE).min(waypoints.len());
-            let chunk = &waypoints[chunk_start..chunk_end];
-            let targets = &run[chunk_start..chunk_end - 1];
-
-            match ors.directions(chunk).await {
-                Ok(legs) => {
-                    for (leg, (point, _)) in legs.into_iter().zip(targets) {
-                        self.push_leg(leg, point);
-                    }
-                }
-                Err(OrsError::Transient(_)) => return Err(RoundError::Ors),
-                Err(OrsError::Permanent(_)) => {
-                    for (pair, (point, target)) in chunk.windows(2).zip(targets) {
-                        match ors.directions(pair).await {
-                            Ok(legs) => match legs.into_iter().next() {
-                                Some(leg) => self.push_leg(leg, point),
-                                None => self.push_fallback(pair[0], *target, point),
-                            },
-                            Err(OrsError::Permanent(_)) => {
-                                self.push_fallback(pair[0], *target, point)
-                            }
-                            Err(OrsError::Transient(_)) => return Err(RoundError::Ors),
-                        }
-                    }
-                }
-            }
+        let legs = ors.directions(&waypoints).await?;
+        for (leg, (point, _)) in legs.into_iter().zip(run) {
+            self.push_leg(leg, point);
         }
 
         Ok(())
     }
 
-    /// One row at the snapped target for a leg that can't be routed.
-    fn push_fallback(&mut self, from: (f64, f64), target: (f64, f64), point: &Point) {
-        let distance = distance_meters(from, target);
-        self.push(target, point.alt, Some(point.id), Some(distance));
-    }
-
-    /// Store a leg without its first position. The last row gets the point's id.
-    fn push_leg(&mut self, leg: Vec<Position>, point: &Point) {
-        if leg.len() == 1 {
-            let position = &leg[0];
-            let alt = elevation(position).or(point.alt);
-            self.push(lon_lat(position), alt, Some(point.id), Some(0.0));
+    fn push_leg(&mut self, leg: Vec<(Coordinate, Option<i16>)>, point: &Point) {
+        if let [(location, elevation)] = leg.as_slice() {
+            self.push(
+                *location,
+                elevation.or(point.alt),
+                Some(point.id),
+                Some(0.0),
+            );
             return;
         }
 
         let last = leg.len().saturating_sub(1);
-        for (index, position) in leg.iter().enumerate().skip(1) {
-            let location = lon_lat(position);
-            let alt = elevation(position).or(point.alt);
-            let distance = self
-                .previous
-                .map(|previous| distance_meters(previous, location));
+        for (index, (location, elevation)) in leg.into_iter().enumerate().skip(1) {
+            let distance = self.previous.map(|previous| previous.distance(location));
             let point_id = (index == last).then_some(point.id);
-            self.push(location, alt, point_id, distance);
+            self.push(location, elevation.or(point.alt), point_id, distance);
         }
     }
-}
-
-/// `(lon, lat)` of a position. The ORS client already rejects positions without both.
-fn lon_lat(position: &[f64]) -> (f64, f64) {
-    (
-        position.first().copied().unwrap_or_default(),
-        position.get(1).copied().unwrap_or_default(),
-    )
-}
-
-/// ORS elevation rounded and clamped to `i16`, if the position has one.
-fn elevation(position: &[f64]) -> Option<i16> {
-    position.get(2).map(|elevation| {
-        elevation
-            .round()
-            .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16
-    })
 }
